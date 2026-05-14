@@ -1,0 +1,526 @@
+Directory structure:
+└── protected_site/
+    ├── docker-compose.yml
+    ├── nginx.conf
+    └── html/
+        ├── collector.js
+        ├── index.html
+        └── styles.css
+
+================================================
+FILE: docker-compose.yml
+================================================
+# protected-site/docker-compose.yml
+version: '3.8'
+
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: protected-site
+    ports:
+      - "3000:80"                   
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./html:/usr/share/nginx/html:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  
+    restart: unless-stopped
+
+
+================================================
+FILE: nginx.conf
+================================================
+events {}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+    
+    upstream humanguard_api {
+        server localhost:8080;
+    }
+
+    server {
+        listen 80;
+        server_name localhost;
+        
+        root /usr/share/nginx/html;
+        index index.html;
+        
+        location = /api/check {
+            proxy_pass http://humanguard_api/api/check;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Site-ID "138fba32-f0a9-43ce-8a52-188cd721c2ef";
+            
+            add_header Access-Control-Allow-Origin *;
+            add_header Access-Control-Allow-Methods "GET, POST, OPTIONS";
+            add_header Access-Control-Allow-Headers "Content-Type, X-Site-ID";
+        }
+        
+        location /api/behavior/ {
+            proxy_pass http://humanguard_api/api/behavior/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Site-ID "138fba32-f0a9-43ce-8a52-188cd721c2ef";
+        }
+        
+        # РЎС‚Р°С‚РёРєР°
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+        
+        location /collector.js {
+            add_header Cache-Control "no-cache";
+        }
+    }
+}
+
+
+================================================
+FILE: html/collector.js
+================================================
+// protected-site/html/collector.js
+(function() {
+    const CHECK_URL = '/api/check';
+    const BEHAVIOR_URL = (sessionId) => `/api/behavior/${sessionId}`;
+    const FLUSH_INTERVAL = 3000;        
+    const MAX_BATCH_SIZE = 100;          
+    
+    const siteMeta = document.querySelector('meta[name="humanguard-site-id"]');
+    const SITE_ID = siteMeta ? siteMeta.getAttribute('content') : null;
+    
+    if (!SITE_ID) {
+        console.warn('[HumanGuard] site-id РЅРµ РЅР°Р№РґРµРЅ. РљРѕР»Р»РµРєС‚РѕСЂ РЅРµ Р±СѓРґРµС‚ СЂР°Р±РѕС‚Р°С‚СЊ.');
+        return;
+    }
+    
+    let sessionId = null;
+    let eventBuffer = [];
+    let flushTimer = null;
+    let checkInProgress = false;
+    
+    async function sendData(endpoint, data) {
+        try {
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Site-ID': SITE_ID
+                },
+                body: JSON.stringify(data),
+                credentials: 'include',    
+                keepalive: true              
+            });
+            
+            if (!response.ok) {
+                console.warn(`[HumanGuard] РћС€РёР±РєР° РѕС‚РїСЂР°РІРєРё: ${response.status}`);
+                return null;
+            }
+            
+            return await response.json();
+        } catch (err) {
+            console.error('[HumanGuard] РћС€РёР±РєР° СЃРµС‚Рё:', err);
+            return null;
+        }
+    }
+    
+    async function flushEvents() {
+        if (!sessionId || eventBuffer.length === 0) return;
+        
+        const eventsToSend = [...eventBuffer];
+        eventBuffer = [];
+        
+        const counters = {};
+        eventsToSend.forEach(event => {
+            counters[event.type] = (counters[event.type] || 0) + 1;
+        });
+        
+        const metrics = {
+            counters: counters,
+            sample_events: eventsToSend.slice(-20),  
+            session_duration_ms: Date.now() - (window.performance.timing?.navigationStart || Date.now()),
+            screen_resolution: `${window.screen.width}x${window.screen.height}`,
+            viewport: `${window.innerWidth}x${window.innerHeight}`,
+            timestamp: new Date().toISOString()
+        };
+        
+        if (window.navigator) {
+            metrics.fingerprint = {
+                user_agent: window.navigator.userAgent,
+                language: window.navigator.language,
+                platform: window.navigator.platform,
+                hardware_concurrency: window.navigator.hardwareConcurrency,
+                device_memory: window.navigator.deviceMemory,
+                do_not_track: window.navigator.doNotTrack
+            };
+        }
+        
+        const result = await sendData(BEHAVIOR_URL(sessionId), {
+            session_id: sessionId,
+            metrics: metrics
+        });
+        
+        if (result && result.risk_score !== undefined) {
+            console.log(`[HumanGuard] РўРµРєСѓС‰РёР№ СЂРёСЃРє: ${result.risk_score}/100`);
+            if (result.risk_score >= 80) {
+                console.warn('[HumanGuard] РЎРµСЃСЃРёСЏ Р·Р°Р±Р»РѕРєРёСЂРѕРІР°РЅР°!');
+            }
+        }
+    }
+    
+    function addEvent(type, data = {}) {
+        if (!sessionId) return;
+        
+        eventBuffer.push({
+            type: type,
+            timestamp: Date.now(),
+            data: data
+        });
+        
+        if (eventBuffer.length >= MAX_BATCH_SIZE) {
+            flushEvents();
+        }
+    }
+    
+    async function initSession() {
+        if (checkInProgress) return;
+        checkInProgress = true;
+        
+        try {
+            const result = await sendData(CHECK_URL, {
+                site_id: SITE_ID
+            });
+            
+            if (result && result.session_id) {
+                sessionId = result.session_id;
+                console.log('[HumanGuard] РЎРµСЃСЃРёСЏ СЃРѕР·РґР°РЅР°:', sessionId, 'Action:', result.action);
+                
+                if (result.action === 'block') {
+                    showBlockPage(result.message || 'Р”РѕСЃС‚СѓРї Р·Р°Р±Р»РѕРєРёСЂРѕРІР°РЅ');
+                } else if (result.action === 'captcha') {
+                    showCaptcha();
+                } else {
+                    startCollection();
+                }
+            }
+        } catch (err) {
+            console.error('[HumanGuard] РћС€РёР±РєР° РёРЅРёС†РёР°Р»РёР·Р°С†РёРё:', err);
+        } finally {
+            checkInProgress = false;
+        }
+    }
+    
+    function showBlockPage(message) {
+        document.body.innerHTML = `
+            <div style="text-align: center; padding: 50px; font-family: Arial, sans-serif;">
+                <h1>рџљ« Р”РѕСЃС‚СѓРї Р·Р°РїСЂРµС‰С‘РЅ</h1>
+                <p>${message || 'Р’Р°С€Р° Р°РєС‚РёРІРЅРѕСЃС‚СЊ СЂР°СЃРїРѕР·РЅР°РЅР° РєР°Рє Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєР°СЏ.'}</p>
+                <p>РљРѕРґ РѕС€РёР±РєРё: HG-BLOCK-001</p>
+            </div>
+        `;
+    }
+    
+    function showCaptcha() {
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+        `;
+        
+        modal.innerHTML = `
+            <div style="background: white; padding: 30px; border-radius: 10px; text-align: center;">
+                <h2>рџ”’ РџСЂРѕРІРµСЂРєР° Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё</h2>
+                <div class="h-captcha" data-sitekey="10000000-ffff-ffff-ffff-000000000001"></div>
+                <p>РџРѕР¶Р°Р»СѓР№СЃС‚Р°, РїРѕРґС‚РІРµСЂРґРёС‚Рµ, С‡С‚Рѕ РІС‹ С‡РµР»РѕРІРµРє</p>
+            </div>
+        `;
+        
+        document.body.appendChild(modal);
+        
+        const script = document.createElement('script');
+        script.src = 'https://js.hcaptcha.com/1/api.js';
+        script.async = true;
+        script.defer = true;
+        document.head.appendChild(script);
+    }
+    
+    // РЎР±РѕСЂ СЃРѕР±С‹С‚РёР№
+    function startCollection() {
+        let scrollTimeout;
+        let mouseMoveTimeout;
+        
+        document.addEventListener('click', (e) => {
+            addEvent('click', {
+                target: e.target.tagName,
+                x: e.clientX,
+                y: e.clientY
+            });
+        });
+        
+        document.addEventListener('mousemove', (e) => {
+            if (mouseMoveTimeout) return;
+            mouseMoveTimeout = setTimeout(() => {
+                addEvent('mouse_move', {
+                    x: e.clientX,
+                    y: e.clientY
+                });
+                mouseMoveTimeout = null;
+            }, 100);
+        });
+        
+        window.addEventListener('scroll', () => {
+            if (scrollTimeout) return;
+            scrollTimeout = setTimeout(() => {
+                addEvent('scroll', {
+                    scrollY: window.scrollY,
+                    scrollX: window.scrollX
+                });
+                scrollTimeout = null;
+            }, 200);
+        });
+        
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Alt' || e.key === 'Control' || e.key === 'Shift') return;
+            
+            addEvent('keydown', {
+                key: e.key,
+                ctrlKey: e.ctrlKey,
+                altKey: e.altKey,
+                shiftKey: e.shiftKey
+            });
+        });
+        
+        window.addEventListener('blur', () => addEvent('blur'));
+        window.addEventListener('focus', () => addEvent('focus'));
+        
+        window.addEventListener('beforeunload', () => {
+            if (eventBuffer.length > 0) {
+                flushEvents();
+            }
+        });
+        
+        flushTimer = setInterval(() => flushEvents(), FLUSH_INTERVAL);
+        
+        console.log('[HumanGuard] РЎР±РѕСЂ РїРѕРІРµРґРµРЅС‡РµСЃРєРёС… РґР°РЅРЅС‹С… Р·Р°РїСѓС‰РµРЅ');
+    }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initSession);
+    } else {
+        initSession();
+    }
+})();
+
+
+================================================
+FILE: html/index.html
+================================================
+Error reading file with 'cp1251': 'charmap' codec can't decode byte 0x98 in position 2640: character maps to <undefined>
+
+
+================================================
+FILE: html/styles.css
+================================================
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+    line-height: 1.6;
+    color: #333;
+    background: #f5f5f5;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+.site-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 20px 0;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+}
+
+.site-header h1 {
+    margin-bottom: 10px;
+}
+
+.site-header nav {
+    display: flex;
+    gap: 20px;
+}
+
+.site-header nav a {
+    color: white;
+    text-decoration: none;
+    padding: 5px 10px;
+    border-radius: 5px;
+    transition: background 0.3s;
+}
+
+.site-header nav a:hover,
+.site-header nav a.active {
+    background: rgba(255,255,255,0.2);
+}
+
+.hero {
+    background: white;
+    padding: 60px 40px;
+    margin: 40px 0;
+    border-radius: 10px;
+    text-align: center;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+.hero h2 {
+    font-size: 2.5em;
+    margin-bottom: 20px;
+    color: #667eea;
+}
+
+.cta-button {
+    background: #667eea;
+    color: white;
+    border: none;
+    padding: 12px 30px;
+    font-size: 1.1em;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: transform 0.2s, background 0.2s;
+    margin-top: 20px;
+}
+
+.cta-button:hover {
+    background: #5a67d8;
+    transform: translateY(-2px);
+}
+
+.features {
+    margin: 40px 0;
+}
+
+.feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 20px;
+    margin-top: 20px;
+}
+
+.feature-card {
+    background: white;
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    transition: transform 0.2s;
+}
+
+.feature-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+}
+
+.interactive-demo {
+    background: white;
+    padding: 40px;
+    margin: 40px 0;
+    border-radius: 10px;
+}
+
+.stats-list {
+    list-style: none;
+    padding: 20px 0;
+}
+
+.stats-list li {
+    padding: 10px 0;
+    border-bottom: 1px solid #eee;
+}
+
+.live-feedback {
+    background: #f0f4ff;
+    padding: 20px;
+    border-radius: 5px;
+    margin-top: 20px;
+    text-align: center;
+}
+
+.contact-form {
+    background: white;
+    padding: 40px;
+    margin: 40px 0;
+    border-radius: 10px;
+}
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: 500;
+}
+
+.form-group input,
+.form-group textarea {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    font-size: 1em;
+}
+
+.submit-button {
+    background: #48bb78;
+    color: white;
+    border: none;
+    padding: 12px 30px;
+    font-size: 1em;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.submit-button:hover {
+    background: #38a169;
+}
+
+.site-footer {
+    background: #2d3748;
+    color: white;
+    text-align: center;
+    padding: 20px 0;
+    margin-top: 40px;
+}
+
+@media (max-width: 768px) {
+    .hero h2 {
+        font-size: 1.8em;
+    }
+    
+    .feature-grid {
+        grid-template-columns: 1fr;
+    }
+    
+    .site-header nav {
+        flex-wrap: wrap;
+    }
+}
+

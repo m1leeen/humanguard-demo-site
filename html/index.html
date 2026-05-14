@@ -1,0 +1,130 @@
+<!-- protected_site/html/index.html -->
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Защищённый сайт | HumanGuard</title>
+    <meta name="humanguard-site-id" content="6ee9b2f5-1c18-43c2-ba0b-67b8e4b51ba2">
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="container">
+            <h1>🛡️ Защищённый сайт</h1>
+            <nav>
+                <a href="/" class="active">Главная</a>
+                <a href="#">О нас</a>
+                <a href="#">Услуги</a>
+                <a href="#">Контакты</a>
+            </nav>
+        </div>
+    </header>
+
+    <main class="container">
+        <section class="hero">
+            <h2>Добро пожаловать!</h2>
+            <p>Этот сайт защищён системой HumanGuard от ботов и автоматических атак.</p>
+            <button class="cta-button" id="demoButton">Нажми для демонстрации</button>
+        </section>
+
+        <section class="features">
+            <h3>Почему мы используем HumanGuard?</h3>
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <h4>🤖 Защита от ботов</h4>
+                    <p>Анализ поведения пользователей в реальном времени</p>
+                </div>
+                <div class="feature-card">
+                    <h4>⚡ Высокая производительность</h4>
+                    <p>Минимальное влияние на скорость загрузки</p>
+                </div>
+                <div class="feature-card">
+                    <h4>📊 Аналитика рисков</h4>
+                    <p>Детальная информация о каждой сессии</p>
+                </div>
+                <div class="feature-card">
+                    <h4>🔒 Безопасность по умолчанию</h4>
+                    <p>Автоматическая блокировка подозрительной активности</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="interactive-demo">
+            <h3>Интерактивная демонстрация</h3>
+            <p>Чем больше вы взаимодействуете со страницей, тем точнее анализ:</p>
+            <ul class="stats-list">
+                <li>✨ Движения мыши</li>
+                <li>🖱️ Клики</li>
+                <li>📜 Скролл страницы</li>
+                <li>⌨️ Нажатия клавиш</li>
+            </ul>
+            <div class="live-feedback" id="liveFeedback">
+                <p>👆 Начните взаимодействие со страницей...</p>
+            </div>
+        </section>
+
+        <section class="contact-form">
+            <h3>Форма обратной связи</h3>
+            <form id="feedbackForm">
+                <div class="form-group">
+                    <label for="name">Имя:</label>
+                    <input type="text" id="name" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label for="email">Email:</label>
+                    <input type="email" id="email" name="email" required>
+                </div>
+                <div class="form-group">
+                    <label for="message">Сообщение:</label>
+                    <textarea id="message" name="message" rows="4" required></textarea>
+                </div>
+                <button type="submit" class="submit-button">Отправить</button>
+            </form>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container">
+            <p>&copy; 2026 Защищённый сайт. Все права защищены.</p>
+            <p>Работает под защитой HumanGuard</p>
+        </div>
+    </footer>
+
+    <script src="/collector.js"></script>
+    <script>
+        const demoBtn = document.getElementById('demoButton');
+        const feedbackDiv = document.getElementById('liveFeedback');
+        let activityCount = 0;
+        
+        demoBtn?.addEventListener('click', () => {
+            alert('Демонстрация: ваше действие зафиксировано коллектором!');
+        });
+        
+        const updateFeedback = (action) => {
+            activityCount++;
+            if (feedbackDiv) {
+                feedbackDiv.innerHTML = `
+                    <p>✅ Зафиксировано действий: ${activityCount}</p>
+                    <p class="small">Последнее действие: ${action}</p>
+                `;
+            }
+        };
+        
+        document.addEventListener('click', (e) => {
+            if (e.target.closest('.feature-card')) {
+                updateFeedback('Клик по карточке');
+            } else if (e.target.tagName === 'BUTTON') {
+                updateFeedback('Нажатие кнопки');
+            }
+        });
+        
+        document.addEventListener('scroll', () => updateFeedback('Прокрутка страницы'));
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+                updateFeedback('Нажатие клавиши');
+            }
+        });
+    </script>
+</body>
+</html>
